@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pattulo — Contract Award Review Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&family=DM+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', sans-serif; background: #f0f4f8; }
+    textarea, input { font-family: 'DM Sans', sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    button:focus { outline: 2px solid #1B3A6B; outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // ─── CONFIG — Edit these for each new contract ─────────────────────────────
+    const PROJECT_META = {
+      projectName:    "Station Park — Phase 2",
+      contractNo:     "CAA-2026-041",
+      contractTitle:  "Structural Steel Supply & Erect",
+      contractor:     "Allied Steel Works Inc.",
+      issueDate:      "2026-06-02",
+      dueDate:        "2026-06-16",
+      owner:          "John Hoeve",
+    };
+
+    const REVIEWERS = [
+      { id: "r1", name: "Sarah Mitchell",  role: "Structural Engineer", company: "AECOM",             email: "s.mitchell@aecom.com" },
+      { id: "r2", name: "Derek Park",      role: "Project Manager",     company: "Metrolinx",          email: "d.park@metrolinx.com" },
+      { id: "r3", name: "Camille Dubois",  role: "Architect",           company: "B+H Architects",     email: "c.dubois@bharchitects.com" },
+      { id: "r4", name: "Marcus Webb",     role: "Cost Consultant",     company: "Turner & Townsend",  email: "m.webb@tat.com" },
+    ];
+
+    const DOCS = [
+      { id: "d1", name: "CAA-2026-041_Contract_Draft.pdf",         size: "2.4 MB" },
+      { id: "d2", name: "CAA-2026-041_Structural_Drawings_Rev3.pdf", size: "8.1 MB" },
+      { id: "d3", name: "CAA-2026-041_Bill_of_Quantities.xlsx",    size: "340 KB" },
+    ];
+    // ──────────────────────────────────────────────────────────────────────────
+
+    const STORAGE_KEY = "pattulo_portal_" + PROJECT_META.contractNo.replace(/[^a-z0-9]/gi,"_");
+
+    function loadState() {
+      try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : null; } catch { return null; }
+    }
+    function saveState(s) {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {}
+    }
+    function freshState() {
+      const rs = {};
+      REVIEWERS.forEach(r => { rs[r.id] = { viewed: false, viewedAt: null, decision: null, decidedAt: null, comments: [] }; });
+      return { reviewerState: rs, ownerDecision: null, ownerComment: "", ownerSignedAt: null, phase: "initial" };
+    }
+    function initState() { return loadState() || freshState(); }
+
+    // ─── HELPERS ───────────────────────────────────────────────────────────────
+    const now = () => new Date().toLocaleDateString("en-CA");
+    const initials = name => name.split(" ").map(n => n[0]).join("");
+
+    // ─── BADGE ────────────────────────────────────────────────────────────────
+    const BADGE_MAP = {
+      approved:       { label: "Approved",           bg: "#d1fae5", color: "#065f46", dot: "#10b981" },
+      approved_noted: { label: "Approved as Noted",  bg: "#fef3c7", color: "#92400e", dot: "#f59e0b" },
+      more_info:      { label: "More Info Required", bg: "#ede9fe", color: "#4c1d95", dot: "#8b5cf6" },
+      viewed:         { label: "Viewed",             bg: "#e0f2fe", color: "#0369a1", dot: "#0ea5e9" },
+      pending:        { label: "Pending",            bg: "#f1f5f9", color: "#64748b", dot: "#94a3b8" },
+    };
+    function Badge({ type }) {
+      const s = BADGE_MAP[type] || BADGE_MAP.pending;
+      return (
+        <span style={{ display:"inline-flex", alignItems:"center", gap:5, background:s.bg, color:s.color,
+          borderRadius:20, padding:"3px 10px", fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>
+          <span style={{ width:6, height:6, borderRadius:"50%", background:s.dot, display:"inline-block" }} />
+          {s.label}
+        </span>
+      );
+    }
+
+    function PriBadge({ level }) {
+      const m = { high:["#ef4444","#fee2e2"], medium:["#f59e0b","#fef3c7"], low:["#22c55e","#dcfce7"] };
+      const [c,b] = m[level]||m.medium;
+      return <span style={{ background:b, color:c, borderRadius:4, padding:"1px 7px", fontSize:10, fontWeight:700,
+        fontFamily:"'DM Mono',monospace", letterSpacing:"0.05em" }}>{level.toUpperCase()}</span>;
+    }
+
+    // ─── COMMENT CARD ─────────────────────────────────────────────────────────
+    function CommentCard({ comment }) {
+      return (
+        <div style={{ background:"#fff", borderRadius:10, padding:"14px 16px", border:"1px solid #e8edf3",
+          marginBottom:10, boxShadow:"0 1px 3px rgba(0,0,0,0.04)" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+              <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:"#94a3b8", fontWeight:600 }}>
+                #{String(comment.id).padStart(2,"0")}
+              </span>
+              <span style={{ fontSize:12, fontWeight:600, color:"#1B3A6B" }}>{comment.section}</span>
+              {comment.page && <span style={{ fontSize:11, color:"#64748b" }}>p.{comment.page}</span>}
+              <PriBadge level={comment.priority} />
+            </div>
+            <span style={{ fontSize:11, color:"#94a3b8" }}>{comment.createdAt}</span>
+          </div>
+          <p style={{ fontSize:13, color:"#334155", margin:"0 0 6px", lineHeight:1.55 }}>{comment.text}</p>
+          {comment.recommendation && (
+            <p style={{ fontSize:12, color:"#64748b", margin:0, fontStyle:"italic" }}>
+              <b style={{ color:"#1B3A6B" }}>Rec:</b> {comment.recommendation}
+            </p>
+          )}
+        </div>
+      );
+    }
+
+    // ─── ADD COMMENT FORM ────────────────────────────────────────────────────
+    function AddCommentForm({ onAdd, nextId }) {
+      const [f, setF] = useState({ section:"", page:"", text:"", recommendation:"", priority:"medium" });
+      const set = k => e => setF(p => ({ ...p, [k]: e.target.value }));
+      const valid = f.section.trim() && f.text.trim();
+      const inp = (k, ph, multi=false) => {
+        const s = { width:"100%", border:"1.5px solid #e2e8f0", borderRadius:8, padding:"9px 12px",
+          fontSize:13, color:"#1e293b", background:"#f8fafc", outline:"none",
+          resize: multi ? "vertical" : "none", minHeight: multi ? 70 : "auto" };
+        return multi
+          ? <textarea style={s} placeholder={ph} value={f[k]} onChange={set(k)} />
+          : <input style={s} placeholder={ph} value={f[k]} onChange={set(k)} />;
+      };
+      function submit() {
+        if (!valid) return;
+        onAdd({ id:nextId, section:f.section.trim(), page:f.page.trim(), text:f.text.trim(),
+          recommendation:f.recommendation.trim(), priority:f.priority, createdAt:now() });
+        setF({ section:"", page:"", text:"", recommendation:"", priority:"medium" });
+      }
+      return (
+        <div style={{ background:"#f0f5ff", borderRadius:12, padding:16, border:"1.5px dashed #93b4dc", marginTop:16 }}>
+          <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:13, marginBottom:12 }}>+ Add Comment</p>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 80px", gap:8, marginBottom:8 }}>
+            {inp("section","Document / Section / Clause reference *")}
+            {inp("page","Page #")}
+          </div>
+          {inp("text","Describe the issue or comment in detail *", true)}
+          <div style={{ marginTop:8 }}>{inp("recommendation","Recommendation (optional)", true)}</div>
+          <div style={{ display:"flex", gap:8, alignItems:"center", marginTop:10, flexWrap:"wrap" }}>
+            <span style={{ fontSize:12, color:"#475569", fontWeight:600 }}>Priority:</span>
+            {["high","medium","low"].map(p => (
+              <button key={p} onClick={() => setF(x => ({ ...x, priority:p }))} style={{
+                padding:"4px 12px", borderRadius:6, fontSize:11, fontWeight:700, cursor:"pointer", border:"none",
+                background: f.priority===p ? (p==="high"?"#ef4444":p==="medium"?"#f59e0b":"#22c55e") : "#e2e8f0",
+                color: f.priority===p ? "#fff" : "#64748b",
+              }}>{p.charAt(0).toUpperCase()+p.slice(1)}</button>
+            ))}
+            <button onClick={submit} disabled={!valid} style={{
+              marginLeft:"auto", padding:"7px 20px", borderRadius:8, background: valid?"#1B3A6B":"#e2e8f0",
+              color: valid?"#fff":"#94a3b8", border:"none", cursor: valid?"pointer":"default",
+              fontWeight:700, fontSize:13,
+            }}>Save Comment</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── REVIEWER VIEW ────────────────────────────────────────────────────────
+    function ReviewerView({ reviewer, rState, allReviewers, allStates, onDecision, onAddComment }) {
+      const [tab, setTab] = useState(reviewer.id);
+      const vs = allStates[tab];
+      const vr = allReviewers.find(r => r.id === tab);
+      const isOwn = tab === reviewer.id;
+      const nextId = (rState.comments||[]).length + 1;
+
+      const decisions = [
+        { key:"approved",       label:"✓  Approved",           c:"#10b981", bg:"#d1fae5" },
+        { key:"approved_noted", label:"~  Approved as Noted",  c:"#f59e0b", bg:"#fef3c7" },
+        { key:"more_info",      label:"?  More Info Required", c:"#8b5cf6", bg:"#ede9fe" },
+      ];
+
+      return (
+        <div>
+          {/* Decision box */}
+          <div style={{ background:"#fff", borderRadius:12, padding:20, marginBottom:20,
+            border:"1px solid #e8edf3", boxShadow:"0 1px 4px rgba(0,0,0,0.05)" }}>
+            <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:14, marginBottom:14 }}>Your Review Decision</p>
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+              {decisions.map(d => (
+                <button key={d.key} onClick={() => onDecision(d.key)} style={{
+                  flex:1, minWidth:140, padding:"12px 14px", borderRadius:10, cursor:"pointer",
+                  border:`2px solid ${rState.decision===d.key ? d.c : "#e2e8f0"}`,
+                  background: rState.decision===d.key ? d.bg : "#f8fafc",
+                  color: rState.decision===d.key ? d.c : "#64748b",
+                  fontWeight:700, fontSize:13, transition:"all 0.15s",
+                }}>{d.label}</button>
+              ))}
+            </div>
+            {rState.decision && (
+              <p style={{ fontSize:12, color:"#64748b", marginTop:8 }}>Recorded {rState.decidedAt}</p>
+            )}
+          </div>
+
+          {/* Reviewer sub-tabs */}
+          <div style={{ display:"flex", gap:6, marginBottom:16, overflowX:"auto", paddingBottom:4 }}>
+            {allReviewers.map(r => {
+              const s = allStates[r.id];
+              const active = tab === r.id;
+              return (
+                <button key={r.id} onClick={() => setTab(r.id)} style={{
+                  padding:"7px 14px", borderRadius:8, cursor:"pointer", whiteSpace:"nowrap",
+                  border: active ? "2px solid #1B3A6B" : "2px solid #e2e8f0",
+                  background: active ? "#1B3A6B" : "#f8fafc",
+                  color: active ? "#fff" : "#64748b",
+                  fontWeight:600, fontSize:12,
+                }}>
+                  {r.name.split(" ")[0]}
+                  {(s.comments||[]).length > 0 && <span style={{ marginLeft:5, opacity:0.75 }}>({s.comments.length})</span>}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Comments panel */}
+          <div style={{ background:"#fff", borderRadius:12, padding:20,
+            border:"1px solid #e8edf3", boxShadow:"0 1px 4px rgba(0,0,0,0.05)" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+              <div>
+                <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:14, margin:0 }}>
+                  {isOwn ? "Your Comments" : `${vr?.name}'s Comments`}
+                </p>
+                <p style={{ fontSize:12, color:"#64748b", marginTop:2 }}>{vr?.role} — {vr?.company}</p>
+              </div>
+              <Badge type={vs.decision||(vs.viewed?"viewed":"pending")} />
+            </div>
+            {(vs.comments||[]).length === 0
+              ? <p style={{ fontSize:13, color:"#94a3b8", fontStyle:"italic" }}>
+                  {isOwn ? "No comments yet — add one below." : "No comments submitted yet."}
+                </p>
+              : (vs.comments||[]).map(c => <CommentCard key={c.id} comment={c} />)
+            }
+            {isOwn && <AddCommentForm onAdd={onAddComment} nextId={nextId} />}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── DASHBOARD ────────────────────────────────────────────────────────────
+    function Dashboard({ states }) {
+      const total = REVIEWERS.length;
+      const viewed = REVIEWERS.filter(r => states[r.id].viewed).length;
+      const decided = REVIEWERS.filter(r => states[r.id].decision).length;
+      const totalComments = REVIEWERS.reduce((a,r) => a+(states[r.id].comments||[]).length,0);
+
+      const stats = [
+        { label:"Reviewers", val:total,   sub:"invited",    c:"#1B3A6B" },
+        { label:"Viewed",    val:viewed,  sub:`of ${total}`, c:"#0ea5e9" },
+        { label:"Responded", val:decided, sub:`of ${total}`, c:"#10b981" },
+        { label:"Comments",  val:totalComments, sub:"total", c:"#f59e0b" },
+      ];
+
+      return (
+        <div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
+            {stats.map(s => (
+              <div key={s.label} style={{ background:"#fff", borderRadius:12, padding:"16px 18px",
+                border:"1px solid #e8edf3", boxShadow:"0 1px 4px rgba(0,0,0,0.05)" }}>
+                <p style={{ fontFamily:"'DM Mono',monospace", fontWeight:700, fontSize:28, color:s.c, margin:"0 0 2px" }}>{s.val}</p>
+                <p style={{ fontSize:12, color:"#64748b", margin:0 }}>{s.label} <span style={{ color:"#94a3b8" }}>{s.sub}</span></p>
+              </div>
+            ))}
+          </div>
+
+          {/* Status table */}
+          <div style={{ background:"#fff", borderRadius:12, border:"1px solid #e8edf3", overflow:"hidden", marginBottom:20 }}>
+            <div style={{ padding:"14px 20px", borderBottom:"1px solid #e8edf3", background:"#f8fafc" }}>
+              <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:14 }}>Reviewer Status</p>
+            </div>
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead>
+                  <tr style={{ background:"#f8fafc" }}>
+                    {["Reviewer","Company","Role","Viewed","Decision","Comments"].map(h => (
+                      <th key={h} style={{ padding:"10px 16px", textAlign:"left", fontSize:11, fontWeight:700,
+                        color:"#64748b", letterSpacing:"0.05em", borderBottom:"1px solid #e8edf3" }}>
+                        {h.toUpperCase()}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {REVIEWERS.map((r,i) => {
+                    const s = states[r.id];
+                    return (
+                      <tr key={r.id} style={{ borderBottom: i<REVIEWERS.length-1?"1px solid #f1f5f9":"none" }}>
+                        <td style={{ padding:"12px 16px", fontWeight:600, color:"#1e293b", fontSize:13 }}>{r.name}</td>
+                        <td style={{ padding:"12px 16px", fontSize:12, color:"#64748b" }}>{r.company}</td>
+                        <td style={{ padding:"12px 16px", fontSize:12, color:"#64748b" }}>{r.role}</td>
+                        <td style={{ padding:"12px 16px" }}>
+                          {s.viewed
+                            ? <span style={{ fontSize:12, color:"#10b981" }}>✓ {s.viewedAt}</span>
+                            : <span style={{ fontSize:12, color:"#94a3b8" }}>Not yet</span>}
+                        </td>
+                        <td style={{ padding:"12px 16px" }}>
+                          <Badge type={s.decision||(s.viewed?"viewed":"pending")} />
+                        </td>
+                        <td style={{ padding:"12px 16px", fontFamily:"'DM Mono',monospace", fontSize:13, fontWeight:700,
+                          color:(s.comments||[]).length>0?"#1B3A6B":"#94a3b8" }}>
+                          {(s.comments||[]).length}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Master comment log */}
+          <div style={{ background:"#fff", borderRadius:12, border:"1px solid #e8edf3", overflow:"hidden" }}>
+            <div style={{ padding:"14px 20px", borderBottom:"1px solid #e8edf3", background:"#f8fafc",
+              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:14 }}>Master Comment Log</p>
+              <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12, color:"#64748b" }}>{totalComments} total</span>
+            </div>
+            <div style={{ padding:16 }}>
+              {totalComments === 0
+                ? <p style={{ fontSize:13, color:"#94a3b8", fontStyle:"italic" }}>No comments submitted yet.</p>
+                : REVIEWERS.map(r => {
+                    const s = states[r.id];
+                    if (!(s.comments||[]).length) return null;
+                    return (
+                      <div key={r.id} style={{ marginBottom:20 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+                          <div style={{ width:30, height:30, borderRadius:"50%", background:"#1B3A6B",
+                            display:"flex", alignItems:"center", justifyContent:"center" }}>
+                            <span style={{ color:"#fff", fontWeight:700, fontSize:11 }}>{initials(r.name)}</span>
+                          </div>
+                          <span style={{ fontWeight:700, fontSize:13, color:"#1e293b" }}>{r.name}</span>
+                          <Badge type={s.decision||(s.viewed?"viewed":"pending")} />
+                        </div>
+                        {s.comments.map(c => <CommentCard key={c.id} comment={c} />)}
+                      </div>
+                    );
+                  })
+              }
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── OWNER SIGNOFF ────────────────────────────────────────────────────────
+    function OwnerSignoff({ appState, onDecide, phase }) {
+      const [dec, setDec] = useState(appState.ownerDecision||null);
+      const [com, setCom] = useState(appState.ownerComment||"");
+
+      if (phase !== "final") {
+        return (
+          <div style={{ background:"#fff", borderRadius:12, padding:40, border:"2px dashed #e2e8f0", textAlign:"center" }}>
+            <div style={{ fontSize:40, marginBottom:12 }}>🔒</div>
+            <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:16, marginBottom:8 }}>Owner Sign-off Locked</p>
+            <p style={{ fontSize:13, color:"#64748b" }}>
+              Owner approval is only required during the <strong>Final Review</strong> phase.<br/>
+              This review is currently in the <strong>Initial Review</strong> phase.
+            </p>
+          </div>
+        );
+      }
+
+      const opts = [
+        { key:"approved",       label:"Final Approval Issued",    c:"#10b981", bg:"#d1fae5" },
+        { key:"approved_noted", label:"Approved with Conditions", c:"#f59e0b", bg:"#fef3c7" },
+        { key:"rejected",       label:"Not Approved — Return",    c:"#ef4444", bg:"#fee2e2" },
+      ];
+
+      return (
+        <div style={{ background:"#fff", borderRadius:12, padding:24,
+          border:"2px solid #1B3A6B", boxShadow:"0 4px 16px rgba(27,58,107,0.1)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20 }}>
+            <div style={{ width:44, height:44, borderRadius:"50%", background:"#1B3A6B",
+              display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <span style={{ color:"#fff", fontWeight:700 }}>JH</span>
+            </div>
+            <div>
+              <p style={{ fontWeight:700, color:"#1B3A6B", fontSize:15, margin:0 }}>Owner Final Disposition</p>
+              <p style={{ fontSize:12, color:"#64748b", margin:0 }}>{PROJECT_META.owner} — Pattulo</p>
+            </div>
+            {appState.ownerDecision && <Badge type={appState.ownerDecision} />}
+          </div>
+
+          <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>
+            {opts.map(o => (
+              <button key={o.key} onClick={() => setDec(o.key)} style={{
+                flex:1, minWidth:150, padding:"12px 14px", borderRadius:10, cursor:"pointer",
+                border:`2px solid ${dec===o.key ? o.c : "#e2e8f0"}`,
+                background: dec===o.key ? o.bg : "#f8fafc",
+                color: dec===o.key ? o.c : "#64748b",
+                fontWeight:700, fontSize:13, transition:"all 0.15s",
+              }}>{o.label}</button>
+            ))}
+          </div>
+
+          <textarea value={com} onChange={e => setCom(e.target.value)}
+            placeholder="Owner conditions, notes, or instructions for next steps…"
+            style={{ width:"100%", minHeight:90, border:"1.5px solid #e2e8f0", borderRadius:8,
+              padding:"10px 12px", fontSize:13, color:"#1e293b", background:"#f8fafc",
+              resize:"vertical", outline:"none" }} />
+
+          <div style={{ display:"flex", alignItems:"center", gap:16, marginTop:14 }}>
+            <button onClick={() => dec && onDecide(dec, com)} disabled={!dec} style={{
+              padding:"11px 28px", borderRadius:8, background: dec?"#1B3A6B":"#e2e8f0",
+              color: dec?"#fff":"#94a3b8", border:"none", cursor: dec?"pointer":"default",
+              fontWeight:700, fontSize:14,
+            }}>
+              {appState.ownerSignedAt ? "Update Decision" : "Issue Final Decision →"}
+            </button>
+            {appState.ownerSignedAt && (
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ fontSize:20 }}>✅</span>
+                <div>
+                  <p style={{ fontSize:13, fontWeight:700, color:"#065f46", margin:0 }}>Decision recorded</p>
+                  <p style={{ fontSize:11, color:"#64748b", margin:0 }}>{appState.ownerSignedAt}</p>
+                </div>
+                <a href={`https://www.docusign.com/products/electronic-signature/how-docusign-works`}
+                  target="_blank" rel="noopener noreferrer"
+                  style={{ marginLeft:8, padding:"8px 16px", borderRadius:8, background:"#f59e0b",
+                    color:"#fff", textDecoration:"none", fontWeight:700, fontSize:12 }}>
+                  🖊 Send via DocuSign
+                </a>
+              </div>
+            )}
+          </div>
+
+          {appState.ownerSignedAt && (
+            <div style={{ marginTop:16, padding:14, background:"#f0fdf4", borderRadius:10,
+              border:"1px solid #bbf7d0", fontSize:12, color:"#166534" }}>
+              <strong>Next step:</strong> Click "Send via DocuSign" above to generate the legally binding
+              signature envelope. The signed document will be emailed back and saved to SharePoint automatically
+              via the Power Automate flow.
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── ADMIN ALL REVIEWS ────────────────────────────────────────────────────
+    function AdminReviews({ states }) {
+      return (
+        <div>
+          {REVIEWERS.map(r => {
+            const s = states[r.id];
+            return (
+              <div key={r.id} style={{ marginBottom:24 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+                  <div style={{ width:34, height:34, borderRadius:"50%", background:"#1B3A6B",
+                    display:"flex", alignItems:"center", justifyContent:"center" }}>
+                    <span style={{ color:"#fff", fontWeight:700, fontSize:12 }}>{initials(r.name)}</span>
+                  </div>
+                  <div>
+                    <span style={{ fontWeight:700, fontSize:14, color:"#1B3A6B" }}>{r.name}</span>
+                    <span style={{ fontSize:12, color:"#64748b", marginLeft:8 }}>{r.role} — {r.company}</span>
+                  </div>
+                  <Badge type={s.decision||(s.viewed?"viewed":"pending")} />
+                  <span style={{ marginLeft:"auto", fontFamily:"'DM Mono',monospace", fontSize:12, color:"#94a3b8" }}>
+                    {(s.comments||[]).length} comment{(s.comments||[]).length!==1?"s":""}
+                  </span>
+                </div>
+                <div style={{ background:"#fff", borderRadius:12, padding:16, border:"1px solid #e8edf3" }}>
+                  {(s.comments||[]).length === 0
+                    ? <p style={{ fontSize:13, color:"#94a3b8", fontStyle:"italic", margin:0 }}>No comments yet.</p>
+                    : s.comments.map(c => <CommentCard key={c.id} comment={c} />)
+                  }
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // ─── LOGIN SCREEN ─────────────────────────────────────────────────────────
+    function LoginScreen({ onSelect }) {
+      return (
+        <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#0f1f3d 0%,#1B3A6B 60%,#1a4a8a 100%)",
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ width:"100%", maxWidth:460 }}>
+            <div style={{ textAlign:"center", marginBottom:28 }}>
+              <div style={{ display:"inline-block", background:"#E87722", borderRadius:10,
+                padding:"7px 18px", marginBottom:14 }}>
+                <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:700, fontSize:13,
+                  color:"#fff", letterSpacing:"0.12em" }}>PATTULO</span>
+              </div>
+              <h1 style={{ color:"#fff", fontSize:22, fontWeight:800, margin:"0 0 6px" }}>
+                Contract Award Review Portal
+              </h1>
+              <p style={{ color:"#93b4dc", fontSize:13, margin:0 }}>
+                {PROJECT_META.contractNo} — {PROJECT_META.contractTitle}
+              </p>
+            </div>
+
+            <div style={{ background:"rgba(255,255,255,0.07)", borderRadius:16, padding:22,
+              border:"1px solid rgba(255,255,255,0.1)" }}>
+              <p style={{ color:"#93b4dc", fontSize:11, fontWeight:700, letterSpacing:"0.08em",
+                margin:"0 0 12px" }}>SELECT YOUR ROLE TO CONTINUE</p>
+
+              {REVIEWERS.map(r => (
+                <button key={r.id} onClick={() => onSelect(r.id)}
+                  style={{ width:"100%", background:"rgba(255,255,255,0.06)",
+                    border:"1px solid rgba(255,255,255,0.1)", borderRadius:10, padding:"12px 14px",
+                    marginBottom:8, cursor:"pointer", display:"flex", alignItems:"center", gap:12,
+                    transition:"background 0.15s" }}
+                  onMouseEnter={e => e.currentTarget.style.background="rgba(255,255,255,0.12)"}
+                  onMouseLeave={e => e.currentTarget.style.background="rgba(255,255,255,0.06)"}>
+                  <div style={{ width:36, height:36, borderRadius:"50%", background:"#E87722",
+                    display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                    <span style={{ color:"#fff", fontWeight:700, fontSize:12 }}>{initials(r.name)}</span>
+                  </div>
+                  <div style={{ textAlign:"left" }}>
+                    <p style={{ color:"#fff", fontWeight:700, fontSize:14, margin:0 }}>{r.name}</p>
+                    <p style={{ color:"#93b4dc", fontSize:12, margin:0 }}>{r.role} — {r.company}</p>
+                  </div>
+                  <span style={{ marginLeft:"auto", color:"#93b4dc", fontSize:18 }}>→</span>
+                </button>
+              ))}
+
+              <div style={{ borderTop:"1px solid rgba(255,255,255,0.1)", marginTop:10, paddingTop:10 }}>
+                <button onClick={() => onSelect("admin")}
+                  style={{ width:"100%", background:"rgba(232,119,34,0.15)",
+                    border:"1px solid rgba(232,119,34,0.4)", borderRadius:10, padding:"12px 14px",
+                    cursor:"pointer", display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ width:36, height:36, borderRadius:"50%", background:"#1B3A6B",
+                    border:"2px solid #E87722", display:"flex", alignItems:"center",
+                    justifyContent:"center", flexShrink:0 }}>
+                    <span style={{ color:"#fff", fontWeight:700, fontSize:12 }}>JH</span>
+                  </div>
+                  <div style={{ textAlign:"left" }}>
+                    <p style={{ color:"#E87722", fontWeight:700, fontSize:14, margin:0 }}>
+                      John Hoeve — Owner / Admin
+                    </p>
+                    <p style={{ color:"#93b4dc", fontSize:12, margin:0 }}>Pattulo — Full access + final sign-off</p>
+                  </div>
+                  <span style={{ marginLeft:"auto", color:"#E87722", fontSize:18 }}>→</span>
+                </button>
+              </div>
+            </div>
+            <p style={{ color:"rgba(255,255,255,0.25)", fontSize:11, textAlign:"center", marginTop:14 }}>
+              In production, reviewers access via a unique email link
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── APP ──────────────────────────────────────────────────────────────────
+    function App() {
+      const [appState, setAppState] = useState(initState);
+      const [user, setUser] = useState(null);
+      const [tab, setTab] = useState("review");
+
+      useEffect(() => { saveState(appState); }, [appState]);
+
+      function login(id) {
+        setUser(id);
+        setTab(id === "admin" ? "dashboard" : "review");
+        if (id !== "admin") {
+          setAppState(s => {
+            if (s.reviewerState[id].viewed) return s;
+            return { ...s, reviewerState: { ...s.reviewerState,
+              [id]: { ...s.reviewerState[id], viewed:true, viewedAt:now() } } };
+          });
+        }
+      }
+
+      if (!user) return <LoginScreen onSelect={login} />;
+
+      const isAdmin = user === "admin";
+      const reviewer = isAdmin ? null : REVIEWERS.find(r => r.id === user);
+      const rState = isAdmin ? null : appState.reviewerState[user];
+
+      const TABS = isAdmin
+        ? [{ id:"dashboard", label:"📊 Dashboard" }, { id:"reviews", label:"💬 All Reviews" }, { id:"owner", label:"✅ Owner Sign-off" }]
+        : [{ id:"review", label:"💬 Review & Comment" }, { id:"dashboard", label:"📊 Dashboard" }];
+
+      return (
+        <div style={{ minHeight:"100vh", background:"#f0f4f8" }}>
+
+          {/* Top bar */}
+          <div style={{ background:"#1B3A6B", padding:"0 20px" }}>
+            <div style={{ maxWidth:980, margin:"0 auto", display:"flex", alignItems:"center",
+              justifyContent:"space-between", height:54 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, overflow:"hidden" }}>
+                <div style={{ background:"#E87722", borderRadius:6, padding:"3px 10px", flexShrink:0 }}>
+                  <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:700, fontSize:11,
+                    color:"#fff", letterSpacing:"0.1em" }}>PATTULO</span>
+                </div>
+                <span style={{ color:"rgba(255,255,255,0.4)", fontSize:13 }}>|</span>
+                <span style={{ color:"#93b4dc", fontSize:12, fontWeight:600, flexShrink:0 }}>{PROJECT_META.contractNo}</span>
+                <span style={{ color:"rgba(255,255,255,0.25)", fontSize:12 }}>—</span>
+                <span style={{ color:"#fff", fontSize:12, fontWeight:600, overflow:"hidden",
+                  textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{PROJECT_META.contractTitle}</span>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+                <span style={{ fontSize:12, color:"#93b4dc" }}>
+                  {isAdmin ? "John Hoeve (Owner)" : reviewer?.name}
+                </span>
+                <button onClick={() => setUser(null)} style={{ background:"rgba(255,255,255,0.1)",
+                  border:"none", borderRadius:6, padding:"5px 10px", color:"#fff",
+                  fontSize:11, cursor:"pointer" }}>Switch</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Phase banner */}
+          <div style={{ background: appState.phase==="final"?"#1a4a2a":"#162d4a", padding:"7px 20px" }}>
+            <div style={{ maxWidth:980, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <div style={{ display:"flex", gap:14, alignItems:"center" }}>
+                <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, fontWeight:700,
+                  letterSpacing:"0.08em", color: appState.phase==="final"?"#86efac":"#93b4dc" }}>
+                  {appState.phase==="final" ? "● FINAL REVIEW PHASE" : "● INITIAL REVIEW PHASE"}
+                </span>
+                <span style={{ fontSize:11, color:"rgba(255,255,255,0.3)" }}>Due: {PROJECT_META.dueDate}</span>
+              </div>
+              {isAdmin && (
+                <div style={{ display:"flex", gap:6 }}>
+                  <button onClick={() => setAppState(s=>({...s,phase:s.phase==="initial"?"final":"initial"}))}
+                    style={{ background:"rgba(255,255,255,0.12)", border:"none", borderRadius:6,
+                      padding:"4px 12px", color:"#fff", fontSize:11, cursor:"pointer", fontWeight:600 }}>
+                    {appState.phase==="initial" ? "→ Move to Final Review" : "← Back to Initial Review"}
+                  </button>
+                  <button onClick={() => { const s=freshState(); setAppState(s); saveState(s); setUser(null); }}
+                    style={{ background:"rgba(255,255,255,0.05)", border:"none", borderRadius:6,
+                      padding:"4px 10px", color:"rgba(255,255,255,0.35)", fontSize:11, cursor:"pointer" }}>
+                    Reset
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ maxWidth:980, margin:"0 auto", padding:"20px 16px" }}>
+
+            {/* Project card */}
+            <div style={{ background:"#fff", borderRadius:12, padding:"14px 18px", marginBottom:18,
+              border:"1px solid #e8edf3", boxShadow:"0 1px 4px rgba(0,0,0,0.05)",
+              display:"flex", flexWrap:"wrap", gap:16, justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <p style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:"#94a3b8",
+                  fontWeight:600, margin:"0 0 3px", letterSpacing:"0.05em" }}>CONTRACT AWARD</p>
+                <p style={{ fontWeight:800, fontSize:17, color:"#1B3A6B", margin:"0 0 2px" }}>
+                  {PROJECT_META.contractTitle}
+                </p>
+                <p style={{ fontSize:12, color:"#64748b", margin:0 }}>
+                  {PROJECT_META.projectName} — {PROJECT_META.contractor}
+                </p>
+              </div>
+              <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                {DOCS.map(d => (
+                  <div key={d.id} style={{ display:"flex", alignItems:"center", gap:6,
+                    background:"#f0f5ff", borderRadius:8, padding:"5px 10px" }}>
+                    <span style={{ fontSize:14 }}>📄</span>
+                    <div>
+                      <p style={{ fontSize:11, fontWeight:600, color:"#1B3A6B", margin:0 }}>
+                        {d.name.split("_").pop()}
+                      </p>
+                      <p style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:"#94a3b8", margin:0 }}>
+                        {d.size}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Tab nav */}
+            <div style={{ display:"flex", gap:4, marginBottom:18, background:"#fff",
+              borderRadius:10, padding:4, border:"1px solid #e8edf3", width:"fit-content" }}>
+              {TABS.map(t => (
+                <button key={t.id} onClick={() => setTab(t.id)} style={{
+                  padding:"8px 16px", borderRadius:7, border:"none", cursor:"pointer",
+                  background: tab===t.id ? "#1B3A6B" : "transparent",
+                  color: tab===t.id ? "#fff" : "#64748b",
+                  fontWeight:600, fontSize:13, transition:"all 0.15s",
+                }}>{t.label}</button>
+              ))}
+            </div>
+
+            {/* Content */}
+            {tab==="dashboard" && <Dashboard states={appState.reviewerState} />}
+            {tab==="review" && !isAdmin && (
+              <ReviewerView
+                reviewer={reviewer}
+                rState={rState}
+                allReviewers={REVIEWERS}
+                allStates={appState.reviewerState}
+                onDecision={d => setAppState(s=>({...s, reviewerState:{...s.reviewerState,
+                  [user]:{...s.reviewerState[user], decision:d, decidedAt:now()}}}))}
+                onAddComment={c => setAppState(s=>({...s, reviewerState:{...s.reviewerState,
+                  [user]:{...s.reviewerState[user], comments:[...(s.reviewerState[user].comments||[]),c]}}}))}
+              />
+            )}
+            {tab==="reviews" && isAdmin && <AdminReviews states={appState.reviewerState} />}
+            {tab==="owner" && isAdmin && (
+              <OwnerSignoff appState={appState} phase={appState.phase}
+                onDecide={(d,c) => setAppState(s=>({...s, ownerDecision:d, ownerComment:c, ownerSignedAt:now()}))} />
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
