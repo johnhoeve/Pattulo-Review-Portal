@@ -69,28 +69,44 @@
 
     // ─── MSAL setup ───────────────────────────────────────────────────────────
     let msalInstance = null;
-    function getMsal() {
+    let msalInitialized = false;
+
+    async function getMsal() {
       if (!msalInstance) {
         msalInstance = new msal.PublicClientApplication({
-          auth: { clientId: CONFIG.clientId, tenantId: CONFIG.tenantId,
-            redirectUri: window.location.origin + window.location.pathname },
-          cache: { cacheLocation: "sessionStorage" },
+          auth: {
+            clientId: CONFIG.clientId,
+            authority: "https://login.microsoftonline.com/common",
+            redirectUri: window.location.origin + window.location.pathname,
+          },
+          cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: true },
         });
+      }
+      if (!msalInitialized) {
+        await msalInstance.initialize();
+        // Handle redirect response on page load
+        try {
+          const resp = await msalInstance.handleRedirectPromise();
+          if (resp && resp.account) {
+            window._msalRedirectAccount = resp.account;
+          }
+        } catch(e) { console.warn("Redirect handle:", e); }
+        msalInitialized = true;
       }
       return msalInstance;
     }
 
     // ─── GRAPH API helpers ────────────────────────────────────────────────────
     async function getToken() {
-      const msal = getMsal();
-      const accounts = msal.getAllAccounts();
+      const msalInst = await getMsal();
+      const accounts = msalInst.getAllAccounts();
       if (accounts.length === 0) throw new Error("NOT_SIGNED_IN");
       try {
-        const res = await msal.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
+        const res = await msalInst.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
         return res.accessToken;
       } catch {
-        const res = await msal.acquireTokenPopup({ scopes: SCOPES });
-        return res.accessToken;
+        await msalInst.acquireTokenRedirect({ scopes: SCOPES });
+        return null;
       }
     }
 
@@ -811,22 +827,42 @@
         return () => clearInterval(pollRef.current);
       }, [user, loadData]);
 
+      // Handle redirect response on mount
+      useEffect(() => {
+        getMsal().then(msalInst => {
+          const account = window._msalRedirectAccount || (msalInst.getAllAccounts()[0] || null);
+          if (account && !user) {
+            const email = account.username.toLowerCase();
+            const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
+            if (match) { setUser(match.id); setTab("review"); }
+            else { setUser("admin"); setTab("dashboard"); }
+          }
+        });
+      }, []);
+
       async function handleMsLogin() {
         setMsLoading(true);
         try {
-          const msal = getMsal();
-          await msal.initialize();
-          const res = await msal.loginPopup({ scopes: SCOPES });
-          setMsAccount(res.account);
-          // Match to reviewer by email
-          const email = res.account.username.toLowerCase();
-          const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
-          if (match) { setUser(match.id); setTab("review"); }
-          else if (email === PROJECT.ownerEmail.toLowerCase()) { setUser("admin"); setTab("dashboard"); }
-          else { setUser("admin"); setTab("dashboard"); } // fallback
+          const msalInst = await getMsal();
+          const accounts = msalInst.getAllAccounts();
+          if (accounts.length > 0) {
+            // Already signed in silently
+            const account = accounts[0];
+            const email = account.username.toLowerCase();
+            const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
+            if (match) { setUser(match.id); setTab("review"); }
+            else { setUser("admin"); setTab("dashboard"); }
+            setMsLoading(false);
+            return;
+          }
+          // Redirect to Microsoft login
+          await msalInst.loginRedirect({ scopes: SCOPES });
+          // Page will redirect — no code runs after this
         } catch (e) {
-          setToast({ msg:"Sign-in failed. Try the reviewer selector below.", type:"error" });
-        } finally { setMsLoading(false); }
+          console.error("Login error:", e);
+          setToast({ msg: "Sign-in failed: " + e.message, type:"error" });
+          setMsLoading(false);
+        }
       }
 
       async function handleLogin(id) {
