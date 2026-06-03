@@ -10,8 +10,6 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
-  <!-- MSAL for Microsoft 365 authentication -->
-  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'DM Sans', sans-serif; background: #f0f4f8; }
@@ -65,52 +63,11 @@
     ];
     // ──────────────────────────────────────────────────────────────────────────
 
-    const SCOPES = ["https://graph.microsoft.com/Sites.ReadWrite.All", "User.Read"];
-
-    // ─── MSAL setup ───────────────────────────────────────────────────────────
-    let msalInstance = null;
-    let msalInitialized = false;
-
-    async function getMsal() {
-      if (!msalInstance) {
-        msalInstance = new msal.PublicClientApplication({
-          auth: {
-            clientId: CONFIG.clientId,
-            authority: "https://login.microsoftonline.com/common",
-            redirectUri: window.location.origin + window.location.pathname,
-          },
-          cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: true },
-        });
-      }
-      if (!msalInitialized) {
-        await msalInstance.initialize();
-        // Handle redirect response on page load
-        try {
-          const resp = await msalInstance.handleRedirectPromise();
-          if (resp && resp.account) {
-            window._msalRedirectAccount = resp.account;
-          }
-        } catch(e) { console.warn("Redirect handle:", e); }
-        msalInitialized = true;
-      }
-      return msalInstance;
-    }
-
-    // ─── GRAPH API helpers ────────────────────────────────────────────────────
+    // ─── GRAPH API helpers — OAuth implicit flow ─────────────────────────────
     async function getToken() {
-      // First try stored token from implicit flow
       const stored = sessionStorage.getItem("pattulo_ms_token");
       if (stored) return stored;
-      // Fallback to MSAL silent
-      try {
-        const msalInst = await getMsal();
-        const accounts = msalInst.getAllAccounts();
-        if (accounts.length === 0) throw new Error("NOT_SIGNED_IN");
-        const res = await msalInst.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
-        return res.accessToken;
-      } catch {
-        throw new Error("NOT_SIGNED_IN");
-      }
+      throw new Error("NOT_SIGNED_IN");
     }
 
     async function graphGet(path) {
@@ -830,84 +787,41 @@
         return () => clearInterval(pollRef.current);
       }, [user, loadData]);
 
-      // Handle redirect response on mount — parse fragment token returned by Microsoft
+      // Handle token on page load (OAuth redirect return)
       useEffect(() => {
-        // Check for token in URL fragment (implicit flow return)
         const hash = window.location.hash;
         if (hash && hash.includes("access_token")) {
           const params = new URLSearchParams(hash.substring(1));
           const accessToken = params.get("access_token");
           if (accessToken) {
-            // Store token, clear fragment
             sessionStorage.setItem("pattulo_ms_token", accessToken);
             window.history.replaceState(null, "", window.location.pathname);
-            // Decode email from JWT
             try {
-              const payload = JSON.parse(atob(accessToken.split(".")[1]));
+              const payload = JSON.parse(atob(accessToken.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
               const email = (payload.preferred_username || payload.upn || payload.email || "").toLowerCase();
               sessionStorage.setItem("pattulo_ms_email", email);
               const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
               if (match) { setUser(match.id); setTab("review"); }
               else { setUser("admin"); setTab("dashboard"); }
-              return;
-            } catch(e) { console.error("Token parse error:", e); }
+            } catch(e) { console.error("Token parse:", e); }
           }
         }
-        // Check for stored token from previous login
-        const storedToken = sessionStorage.getItem("pattulo_ms_token");
-        const storedEmail = sessionStorage.getItem("pattulo_ms_email");
-        if (storedToken && storedEmail) {
-          const match = REVIEWERS.find(r => r.email.toLowerCase() === storedEmail);
-          if (match) { setUser(match.id); setTab("review"); }
-          else { setUser("admin"); setTab("dashboard"); }
-          return;
-        }
-        // Fallback: check MSAL accounts
-        getMsal().then(msalInst => {
-          const account = window._msalRedirectAccount || (msalInst.getAllAccounts()[0] || null);
-          if (account && !user) {
-            const email = account.username.toLowerCase();
-            const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
-            if (match) { setUser(match.id); setTab("review"); }
-            else { setUser("admin"); setTab("dashboard"); }
-          }
-        });
       }, []);
 
       async function handleMsLogin() {
         setMsLoading(true);
         try {
-          const msalInst = await getMsal();
-          // Check if already signed in from a previous session
-          const accounts = msalInst.getAllAccounts();
-          if (accounts.length > 0) {
-            const account = accounts[0];
-            const email = account.username.toLowerCase();
-            const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
-            if (match) { setUser(match.id); setTab("review"); }
-            else { setUser("admin"); setTab("dashboard"); }
-            setMsLoading(false);
-            return;
-          }
-          // Build Microsoft login URL manually to avoid extension interference
-          const state = btoa(JSON.stringify({ ts: Date.now() }));
-          const nonce = btoa(Math.random().toString());
           const params = new URLSearchParams({
             client_id: CONFIG.clientId,
             response_type: "token",
             redirect_uri: window.location.origin + window.location.pathname,
-            scope: SCOPES.join(" "),
+            scope: "https://graph.microsoft.com/Sites.ReadWrite.All User.Read",
             response_mode: "fragment",
-            state,
-            nonce,
+            nonce: btoa(Math.random().toString()),
             prompt: "select_account",
           });
-          // Store nonce for validation on return
-          sessionStorage.setItem("msal_nonce", nonce);
-          sessionStorage.setItem("msal_state", state);
           window.location.href = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params}`;
         } catch (e) {
-          console.error("Login error:", e);
           setToast({ msg: "Sign-in failed: " + e.message, type:"error" });
           setMsLoading(false);
         }
