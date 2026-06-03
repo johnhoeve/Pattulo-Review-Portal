@@ -98,15 +98,18 @@
 
     // ─── GRAPH API helpers ────────────────────────────────────────────────────
     async function getToken() {
-      const msalInst = await getMsal();
-      const accounts = msalInst.getAllAccounts();
-      if (accounts.length === 0) throw new Error("NOT_SIGNED_IN");
+      // First try stored token from implicit flow
+      const stored = sessionStorage.getItem("pattulo_ms_token");
+      if (stored) return stored;
+      // Fallback to MSAL silent
       try {
+        const msalInst = await getMsal();
+        const accounts = msalInst.getAllAccounts();
+        if (accounts.length === 0) throw new Error("NOT_SIGNED_IN");
         const res = await msalInst.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
         return res.accessToken;
       } catch {
-        await msalInst.acquireTokenRedirect({ scopes: SCOPES });
-        return null;
+        throw new Error("NOT_SIGNED_IN");
       }
     }
 
@@ -827,8 +830,39 @@
         return () => clearInterval(pollRef.current);
       }, [user, loadData]);
 
-      // Handle redirect response on mount
+      // Handle redirect response on mount — parse fragment token returned by Microsoft
       useEffect(() => {
+        // Check for token in URL fragment (implicit flow return)
+        const hash = window.location.hash;
+        if (hash && hash.includes("access_token")) {
+          const params = new URLSearchParams(hash.substring(1));
+          const accessToken = params.get("access_token");
+          if (accessToken) {
+            // Store token, clear fragment
+            sessionStorage.setItem("pattulo_ms_token", accessToken);
+            window.history.replaceState(null, "", window.location.pathname);
+            // Decode email from JWT
+            try {
+              const payload = JSON.parse(atob(accessToken.split(".")[1]));
+              const email = (payload.preferred_username || payload.upn || payload.email || "").toLowerCase();
+              sessionStorage.setItem("pattulo_ms_email", email);
+              const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
+              if (match) { setUser(match.id); setTab("review"); }
+              else { setUser("admin"); setTab("dashboard"); }
+              return;
+            } catch(e) { console.error("Token parse error:", e); }
+          }
+        }
+        // Check for stored token from previous login
+        const storedToken = sessionStorage.getItem("pattulo_ms_token");
+        const storedEmail = sessionStorage.getItem("pattulo_ms_email");
+        if (storedToken && storedEmail) {
+          const match = REVIEWERS.find(r => r.email.toLowerCase() === storedEmail);
+          if (match) { setUser(match.id); setTab("review"); }
+          else { setUser("admin"); setTab("dashboard"); }
+          return;
+        }
+        // Fallback: check MSAL accounts
         getMsal().then(msalInst => {
           const account = window._msalRedirectAccount || (msalInst.getAllAccounts()[0] || null);
           if (account && !user) {
@@ -844,9 +878,9 @@
         setMsLoading(true);
         try {
           const msalInst = await getMsal();
+          // Check if already signed in from a previous session
           const accounts = msalInst.getAllAccounts();
           if (accounts.length > 0) {
-            // Already signed in silently
             const account = accounts[0];
             const email = account.username.toLowerCase();
             const match = REVIEWERS.find(r => r.email.toLowerCase() === email);
@@ -855,9 +889,23 @@
             setMsLoading(false);
             return;
           }
-          // Redirect to Microsoft login
-          await msalInst.loginRedirect({ scopes: SCOPES });
-          // Page will redirect — no code runs after this
+          // Build Microsoft login URL manually to avoid extension interference
+          const state = btoa(JSON.stringify({ ts: Date.now() }));
+          const nonce = btoa(Math.random().toString());
+          const params = new URLSearchParams({
+            client_id: CONFIG.clientId,
+            response_type: "token",
+            redirect_uri: window.location.origin + window.location.pathname,
+            scope: SCOPES.join(" "),
+            response_mode: "fragment",
+            state,
+            nonce,
+            prompt: "select_account",
+          });
+          // Store nonce for validation on return
+          sessionStorage.setItem("msal_nonce", nonce);
+          sessionStorage.setItem("msal_state", state);
+          window.location.href = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params}`;
         } catch (e) {
           console.error("Login error:", e);
           setToast({ msg: "Sign-in failed: " + e.message, type:"error" });
